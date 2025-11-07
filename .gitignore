@@ -1,0 +1,21 @@
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/
+logs/
+__pycache__/
+*.pyc
+
+# Python
+.env
+*.env
+venv/
+env/
+.venv/
+
+# FAISS index files
+faiss_index/
+docs/*.pdf
+
+# OS
+.DS_Store
+Thumbs.db

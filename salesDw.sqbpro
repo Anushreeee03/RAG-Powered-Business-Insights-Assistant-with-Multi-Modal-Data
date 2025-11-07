@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?><sqlb_project><db path="salesDw.db" readonly="0" foreign_keys="1" case_sensitive_like="0" temp_store="0" wal_autocheckpoint="1000" synchronous="2"/><attached/><window><main_tabs open="browser structure pragmas query" current="1"/></window><tab_structure><column_width id="0" width="300"/><column_width id="1" width="0"/><column_width id="2" width="100"/><column_width id="3" width="2483"/><column_width id="4" width="0"/><expanded_item id="0" parent="1"/><expanded_item id="1" parent="1"/><expanded_item id="2" parent="1"/><expanded_item id="3" parent="1"/></tab_structure><tab_browse><table title="FactReturns" custom_title="0" dock_id="1" table="4,11:mainFactReturns"/><dock_state state="000000ff00000000fd0000000100000002000005f4000002aefc0100000001fb000000160064006f0063006b00420072006f00770073006500310100000000000005f40000012400ffffff000002580000000000000004000000040000000800000008fc00000000"/><default_encoding codec=""/><browse_table_settings><table schema="main" name="DimCustomer" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="82"/><column index="2" value="179"/><column index="3" value="93"/><column index="4" value="109"/><column index="5" value="140"/><column index="6" value="117"/><column index="7" value="77"/><column index="8" value="62"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="DimDate" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="1"/></sort><column_widths><column index="1" value="117"/><column index="2" value="85"/><column index="3" value="85"/><column index="4" value="117"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="DimProduct" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="124"/><column index="2" value="124"/><column index="3" value="93"/><column index="4" value="300"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="FactMarketing" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="0" mode="0"/></sort><column_widths><column index="1" value="84"/><column index="2" value="117"/><column index="3" value="62"/><column index="4" value="156"/><column index="5" value="93"/><column index="6" value="195"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="FactReturns" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort><column index="7" mode="0"/></sort><column_widths><column index="1" value="67"/><column index="2" value="117"/><column index="3" value="124"/><column index="4" value="85"/><column index="5" value="117"/><column index="6" value="73"/><column index="7" value="97"/><column index="8" value="195"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="FactSales" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="58"/><column index="2" value="117"/><column index="3" value="85"/><column index="4" value="124"/><column index="5" value="117"/><column index="6" value="78"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="SalesDataMart" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="124"/><column index="2" value="93"/><column index="3" value="62"/><column index="4" value="117"/><column index="5" value="85"/><column index="6" value="81"/><column index="7" value="113"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table><table schema="main" name="stg_sales" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="50"/><column index="2" value="117"/><column index="3" value="85"/><column index="4" value="85"/><column index="5" value="117"/><column index="6" value="78"/><column index="7" value="163"/><column index="8" value="93"/><column index="9" value="109"/><column index="10" value="132"/><column index="11" value="117"/><column index="12" value="73"/><column index="13" value="62"/><column index="14" value="124"/><column index="15" value="124"/><column index="16" value="93"/><column index="17" value="300"/><column index="18" value="78"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table></browse_table_settings></tab_browse><tab_sql><sql name="SQL 1*">INSERT INTO FactReturns (Order_ID, Product_ID, Customer_ID, Date_ID, Return_Qty, Return_Amount, Reason)
+SELECT
+    f.Order_ID,
+    f.Product_ID,
+    f.Customer_ID,
+    f.Date_ID,
+    1 AS Return_Qty,
+    ROUND(f.Sales * (0.2 + (ABS(RANDOM()) % 50) / 100.0), 2) AS Return_Amount,
+    CASE ABS(RANDOM()) % 4
+        WHEN 0 THEN 'Damaged'
+        WHEN 1 THEN 'Customer Dissatisfaction'
+        WHEN 2 THEN 'Wrong Item'
+        ELSE 'Delivery Delay'
+    END AS Reason
+FROM FactSales f
+WHERE CAST(substr(f.Order_ID, -2) AS INTEGER) % 50 = 0;
+
+
+CREATE TABLE FactReturns (
+    Return_ID INTEGER PRIMARY KEY AUTOINCREMENT,
+    Order_ID TEXT,
+    Product_ID TEXT,
+    Customer_ID TEXT,
+    Date_ID TEXT,
+    Return_Qty REAL,
+    Return_Amount REAL,
+    Reason TEXT,
+    FOREIGN KEY (Product_ID) REFERENCES DimProduct(Product_ID),
+    FOREIGN KEY (Customer_ID) REFERENCES DimCustomer(Customer_ID),
+    FOREIGN KEY (Date_ID) REFERENCES DimDate(Date_ID)
+);
+
+
+CREATE TABLE IF NOT EXISTS FactMarketing (
+    Campaign_ID INTEGER PRIMARY KEY AUTOINCREMENT,
+    Date_ID TEXT,
+    Region TEXT,
+    Channel TEXT,
+    Spend_Amount REAL,
+    Campaign_Name TEXT,
+    FOREIGN KEY (Date_ID) REFERENCES DimDate(Date_ID)
+);
+
+
+SELECT 
+    c.Region,
+    SUM(f.Sales) AS Total_Sales,
+    SUM(m.Spend_Amount) AS Marketing_Spend
+FROM FactSales f
+JOIN DimCustomer c ON f.Customer_ID = c.Customer_ID
+JOIN FactMarketing m ON f.Date_ID = m.Date_ID AND c.Region = m.Region
+GROUP BY c.Region;
+</sql><sql name="SQL 2*">DROP TABLE IF EXISTS FactReturns;
+
+
+INSERT INTO FactMarketing (Date_ID, Region, Channel, Spend_Amount, Campaign_Name)
+SELECT DISTINCT
+    f.Date_ID,
+    c.Region,
+    CASE ABS(RANDOM()) % 3
+        WHEN 0 THEN 'Digital Ads'
+        WHEN 1 THEN 'Email Marketing'
+        ELSE 'Influencer Campaign'
+    END AS Channel,
+    ROUND((ABS(RANDOM()) % 8000) + 2000,2) AS Spend_Amount,
+    'Brand Awareness Campaign'
+FROM FactSales f
+JOIN DimCustomer c ON f.Customer_ID = c.Customer_ID;
+
+SELECT * FROM FactMarketing LIMIT 10;
+
+</sql><current_tab id="0"/></tab_sql></sqlb_project>
