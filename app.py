@@ -121,7 +121,10 @@ def run_question(q: str):
 
             c1, c2 = st.columns([1,2])
             with c1:
-                st.download_button("⬇️ Download Excel", open(out["export_path"], "rb"), "results.xlsx")
+                if out.get("export_path") and os.path.exists(out["export_path"]):
+                    st.download_button("⬇️ Download Excel", open(out["export_path"], "rb"), "results.xlsx")
+                else:
+                    st.caption("Excel export unavailable")
             with c2:
                 st.markdown("<div class='section-title'>Sources</div>", unsafe_allow_html=True)
                 render_doc_sources(out.get("sources", []))

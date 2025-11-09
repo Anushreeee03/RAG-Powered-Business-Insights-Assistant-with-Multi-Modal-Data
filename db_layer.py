@@ -8,7 +8,6 @@ from typing import Dict, List
 
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "salesDw.db")
-conn = sqlite3.connect(DB_PATH)
 
 
 def connect_db(path: str = DB_PATH):

@@ -1,9 +1,25 @@
 # nl2sql_advanced.py
 import os, re, json, sqlite3
 from typing import Dict, List, Tuple, Optional, Set, Iterable
-import sqlparse
-import pandas as pd  # optional: used for insight prompts
-from groq import Groq
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+try:
+    import sqlparse
+except ImportError:
+    raise ImportError("sqlparse is required. Install with: pip install sqlparse")
+
+try:
+    import pandas as pd  # optional: used for insight prompts
+except ImportError:
+    raise ImportError("pandas is required. Install with: pip install pandas")
+
+try:
+    from groq import Groq
+except ImportError:
+    raise ImportError("groq is required. Install with: pip install groq")
 
 # =========================
 # ---- Groq Setup ----------
@@ -17,8 +33,11 @@ def get_groq_client():
         except Exception:
             pass
     if not key:
-        raise RuntimeError("GROQ_API_KEY missing.")
-    return Groq(api_key=key)
+        raise RuntimeError("GROQ_API_KEY missing. Please set environment variable or Streamlit secret.")
+    try:
+        return Groq(api_key=key)
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize Groq client: {e}")
 
 MODEL_NAME = "llama-3.3-70b-versatile"
 
@@ -132,10 +151,16 @@ def format_join_hints(joins: List[Tuple[str, str, str]]) -> str:
 # ---- SQL Normalizers ----
 # =========================
 def allow_with_select_only(sql: str) -> Tuple[bool, str]:
+    if not sql or not sql.strip():
+        return False, "Empty SQL query"
+    
     # Strip comments
     s = re.sub(r"--.*?$", "", sql, flags=re.M)
     s = re.sub(r"/\*.*?\*/", "", s, flags=re.S).strip()
-
+    
+    # Remove extra whitespace
+    s = re.sub(r'\s+', ' ', s)
+    
     # Must be one statement
     stmts = [str(x).strip() for x in sqlparse.parse(s) if str(x).strip()]
     if len(stmts) != 1:
@@ -145,10 +170,18 @@ def allow_with_select_only(sql: str) -> Tuple[bool, str]:
     if not re.match(r"^\s*(WITH|SELECT)\b", s, re.I):
         return False, "Only WITH/SELECT queries are allowed."
 
-    # Forbid dangerous
+    # Forbid dangerous patterns
     for pat in DANGEROUS:
         if re.search(pat, s.upper()):
             return False, f"Forbidden keyword: {pat}"
+
+    # Additional safety checks
+    if re.search(r'--|/\*|\*/', s):
+        return False, "Comments not allowed in SQL"
+    
+    # Check for basic SQL structure
+    if not re.search(r'\bFROM\b', s, re.I):
+        return False, "SQL must contain FROM clause"
 
     return True, "OK"
 
@@ -259,16 +292,91 @@ def enforce_aliases(sql: str, schema: Dict[str, List[str]]) -> str:
     return sql
 
 def extract_sql(text: str) -> str:
-    # JSON mode first
+    if not text:
+        return ""
+    
+    print(f"Attempting to extract SQL from: {text[:300]}...")
+    
+    # Method 1: Try to extract JSON with sql field
     try:
-        obj = json.loads(text)
-        if isinstance(obj, dict) and obj.get("sql"):
-            return str(obj["sql"]).strip()
-    except Exception:
-        pass
-    # Fallback: first SELECT/WITH to semicolon or EoS
-    m = re.search(r"((WITH|SELECT)[\s\S]*?)(?:;|$)", text, re.I)
-    return m.group(1).strip() if m else ""
+        # Look for JSON pattern more flexibly
+        json_patterns = [
+            r'\{[^{}]*"sql"[^{}]*\}',
+            r'\{[^{}]*\'sql\'[^{}]*\}',
+            r'\{"sql"\s*:\s*"[^"]*"\}',
+            r'\{\'sql\':\s*\'[^\']*\'\}'
+        ]
+        
+        for pattern in json_patterns:
+            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                try:
+                    obj = json.loads(match.group())
+                    sql = obj.get("sql") or obj.get('sql')
+                    if sql:
+                        sql = str(sql).strip()
+                        # Clean up quotes if present
+                        sql = re.sub(r'^["\']|["\']$', '', sql)
+                        print(f"Extracted from JSON: {sql}")
+                        return sql
+                except:
+                    continue
+    except Exception as e:
+        print(f"JSON extraction failed: {e}")
+    
+    # Method 2: Direct SQL extraction - look for WITH or SELECT
+    try:
+        # Remove common artifacts
+        clean_text = re.sub(r'[\{\}\[\]"\'`]', '', text)
+        clean_text = re.sub(r'\\n', ' ', clean_text)
+        clean_text = re.sub(r'\\', '', clean_text)
+        
+        # Look for SQL statements
+        patterns = [
+            r'((WITH|SELECT)[\s\S]*?)(?:;|$)',
+            r'(WITH\s+[\s\S]*?SELECT[\s\S]*?)(?:;|$)',
+            r'(SELECT[\s\S]*?FROM[\s\S]*?)(?:;|$)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, clean_text, re.IGNORECASE)
+            if match:
+                sql = match.group(1).strip()
+                # Clean up extra whitespace
+                sql = re.sub(r'\s+', ' ', sql)
+                # Ensure it ends properly
+                if not sql.endswith(';'):
+                    sql += ';'
+                print(f"Extracted directly: {sql}")
+                return sql
+    except Exception as e:
+        print(f"Direct extraction failed: {e}")
+    
+    # Method 3: Very basic fallback
+    try:
+        # Just find anything that looks like SELECT
+        if 'SELECT' in text.upper():
+            # Extract everything from SELECT to the end or semicolon
+            select_start = text.upper().find('SELECT')
+            if select_start != -1:
+                sql_part = text[select_start:]
+                # Find the end
+                end_patterns = [';', '\n\n', '"', '}']
+                for end_pat in end_patterns:
+                    end_pos = sql_part.find(end_pat)
+                    if end_pos != -1:
+                        sql_part = sql_part[:end_pos]
+                        break
+                sql = sql_part.strip()
+                if sql and not sql.endswith(';'):
+                    sql += ';'
+                print(f"Basic extraction: {sql}")
+                return sql
+    except Exception as e:
+        print(f"Basic extraction failed: {e}")
+    
+    print("No SQL could be extracted")
+    return ""
 
 # =========================
 # ---- Prompting ----------
@@ -294,9 +402,15 @@ def build_schema_prompt(
         "Use the returns amount column from FactReturns, not FactSales.Sales.\n"
         "- **TOP-N RULE**: For requests like 'top N customers/products by X', return a tabular result grouped by that entity, "
         "with an explicit ORDER BY the metric DESC and LIMIT N.\n"
+        "- **DATE FILTERS**: For date-based queries, use proper date functions: "
+        "strftime('%Y', DimDate.Order_Date) for year, "
+        "strftime('%m', DimDate.Order_Date) for month, "
+        "strftime('%Y-%m', DimDate.Order_Date) for year-month.\n"
+        "- **AGGREGATION RULES**: Use appropriate aggregations - SUM for totals, AVG for averages, "
+        "COUNT for counts, MAX/MIN for extremes. Always use proper column names.\n"
         "- Do NOT use JSON_OBJECT, JSON_ARRAY, JSON_GROUP_ARRAY, or JSON extraction.\n"
         "- Always return raw tabular rows using SELECT columns (rows & columns, not a JSON blob).\n"
-        'Return ONLY JSON wrapper for SQL like: {\"sql\":\"...\"}'
+        'Return ONLY JSON wrapper for SQL like: {"sql":"..."}'
     )
 
     # keep column map concise but real
@@ -307,17 +421,21 @@ def build_schema_prompt(
     return f"{prev}{rules}\n\n{col_map}\n\nUser question: {user_q}"
 
 def call_groq_chat(prompt: str) -> str:
-    client = get_groq_client()
-    resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": "Convert English to one safe SQLite WITH/SELECT; return JSON {\"sql\": \"...\"}."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.0,
-        max_tokens=768,
-    )
-    return resp.choices[0].message.content
+    try:
+        client = get_groq_client()
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "Convert English to one safe SQLite WITH/SELECT; return JSON {\"sql\": \"...\"}."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=768,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        print(f"Groq API error: {e}")
+        return ""
 
 FALLBACKS = [
     (r"\btop\s*\d+\s*products\b.*\bsales\b",
@@ -330,17 +448,77 @@ FALLBACKS = [
      "LEFT JOIN FactSales f ON f.Product_ID = p.Product_ID "
      "LEFT JOIN FactReturns r ON r.Order_ID = f.Order_ID "
      "GROUP BY p.Category ORDER BY returns_count DESC LIMIT {k};"),
+    (r"\bsales\s+by\s+(month|year|quarter)\b",
+     "SELECT strftime('%Y-%m', d.Order_Date) AS period, SUM(f.Sales) AS total_sales "
+     "FROM FactSales f JOIN DimDate d ON f.Date_ID = d.Date_ID "
+     "GROUP BY period ORDER BY period DESC LIMIT 12;"),
+    (r"\bcustomer\s+segmentation\b",
+     "SELECT c.Customer_Segment, COUNT(DISTINCT c.Customer_ID) AS customer_count, SUM(f.Sales) AS total_sales "
+     "FROM FactSales f JOIN DimCustomer c ON f.Customer_ID = c.Customer_ID "
+     "GROUP BY c.Customer_Segment ORDER BY total_sales DESC;"),
+    (r"\bprofit\s+margin\b",
+     "SELECT p.Category, (SUM(f.Sales) - SUM(f.Cost)) / SUM(f.Sales) * 100 AS profit_margin "
+     "FROM FactSales f JOIN DimProduct p ON f.Product_ID = p.Product_ID "
+     "GROUP BY p.Category ORDER BY profit_margin DESC;"),
+    (r"\bsales\s+by\s+category\b",
+     "SELECT p.Category, SUM(f.Sales) AS total_sales "
+     "FROM FactSales f JOIN DimProduct p ON f.Product_ID = p.Product_ID "
+     "GROUP BY p.Category ORDER BY total_sales DESC;"),
+    (r"\bsales\s+by\s+region\b",
+     "SELECT c.Region, SUM(f.Sales) AS total_sales "
+     "FROM FactSales f JOIN DimCustomer c ON f.Customer_ID = c.Customer_ID "
+     "GROUP BY c.Region ORDER BY total_sales DESC;"),
+    (r"\bcustomer\s+count\b",
+     "SELECT COUNT(DISTINCT c.Customer_ID) AS customer_count "
+     "FROM FactSales f JOIN DimCustomer c ON f.Customer_ID = c.Customer_ID;"),
+    (r"\border\s+count\b",
+     "SELECT COUNT(DISTINCT f.Order_ID) AS order_count "
+     "FROM FactSales f;"),
 ]
 
 def fallback_sql_for(q: str) -> Optional[str]:
     ql = q.lower()
+    print(f"Trying fallback for: {q}")
+    
     for pat, tmpl in FALLBACKS:
         if re.search(pat, ql):
             k = 10
             m = re.search(r"top\s*(\d+)", ql)
             if m:
                 k = int(m.group(1))
-            return tmpl.format(k=k)
+            result = tmpl.format(k=k)
+            print(f"Fallback matched pattern {pat}: {result}")
+            return result
+    
+    # Additional generic fallbacks
+    if "sales" in ql and "total" in ql:
+        result = "SELECT SUM(f.Sales) AS total_sales FROM FactSales f LIMIT 1;"
+        print(f"Generic sales fallback: {result}")
+        return result
+    
+    if "count" in ql and ("orders" in ql or "order" in ql):
+        result = "SELECT COUNT(DISTINCT f.Order_ID) AS order_count FROM FactSales f LIMIT 1;"
+        print(f"Generic order count fallback: {result}")
+        return result
+        
+    if "count" in ql and ("customers" in ql or "customer" in ql):
+        result = "SELECT COUNT(DISTINCT c.Customer_ID) AS customer_count FROM FactSales f JOIN DimCustomer c ON f.Customer_ID = c.Customer_ID LIMIT 1;"
+        print(f"Generic customer count fallback: {result}")
+        return result
+    
+    if "average" in ql or "avg" in ql:
+        if "sales" in ql:
+            result = "SELECT AVG(f.Sales) AS avg_sales FROM FactSales f LIMIT 1;"
+            print(f"Generic average sales fallback: {result}")
+            return result
+    
+    # Last resort - basic sales query
+    if "sales" in ql:
+        result = "SELECT SUM(f.Sales) AS total_sales, COUNT(DISTINCT f.Order_ID) AS order_count FROM FactSales f LIMIT 1;"
+        print(f"Last resort sales fallback: {result}")
+        return result
+    
+    print("No fallback found")
     return None
 
 # =========================
@@ -354,17 +532,21 @@ def build_insight_prompt(user_q, sql, df, max_rows: int = 10) -> str:
     )
 
 def llm_summarize(prompt: str) -> str:
-    client = get_groq_client()
-    resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": "Summarize in 3 simple lines."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.0,
-        max_tokens=128
-    )
-    return resp.choices[0].message.content.strip()
+    try:
+        client = get_groq_client()
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "Summarize in 3 simple lines."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=128
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"LLM summarization error: {e}")
+        return "Unable to generate summary due to API error."
 
 # =========================
 # ---- NL→SQL Pipeline ----
@@ -392,16 +574,24 @@ def nl_to_sql_and_insight(
 
     # Call LLM
     raw = call_groq_chat(prompt)
+    
+    # Debug logging
+    print(f"LLM Raw Response: {raw[:200]}...")
+    
     sql = extract_sql(raw) or fallback_sql_for(user_q)
     if not sql:
-        result["error"] = "Could not extract SQL."
+        result["error"] = "Could not extract SQL from LLM response."
+        print(f"Failed to extract SQL from: {raw}")
         return result
+
+    print(f"Extracted SQL: {sql}")
 
     # Safety
     ok, msg = allow_with_select_only(sql)
     if not ok:
         result["error"] = f"Safety check failed: {msg}"
         result["sql"] = sql
+        print(f"Safety check failed: {msg} for SQL: {sql}")
         return result
 
     # Normalize & repair

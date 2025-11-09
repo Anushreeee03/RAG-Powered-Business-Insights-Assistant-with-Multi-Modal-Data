@@ -3,13 +3,46 @@ import os
 import json
 from pathlib import Path
 from typing import List, Dict, Any
-
-import numpy as np
-from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
-import faiss
+import warnings
 import re
-from nltk.tokenize import sent_tokenize   # Requires: nltk.download('punkt'); nltk.download('punkt_tab')
+
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+try:
+    import numpy as np
+except ImportError:
+    raise ImportError("numpy is required. Install with: pip install numpy")
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    raise ImportError("pypdf is required. Install with: pip install pypdf")
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    raise ImportError("sentence-transformers is required. Install with: pip install sentence-transformers")
+
+try:
+    import faiss
+except ImportError:
+    raise ImportError("faiss-cpu is required. Install with: pip install faiss-cpu")
+
+try:
+    import nltk
+    from nltk.tokenize import sent_tokenize
+    # Download required NLTK data
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt', quiet=True)
+    try:
+        nltk.data.find('tokenizers/punkt_tab')
+    except LookupError:
+        nltk.download('punkt_tab', quiet=True)
+except ImportError:
+    raise ImportError("nltk is required. Install with: pip install nltk")
 
 DOCS_DIR = Path("./docs")
 INDEX_DIR = Path("./faiss_index")
@@ -17,8 +50,9 @@ INDEX_FILE = INDEX_DIR / "index.faiss"
 METADATA_FILE = INDEX_DIR / "metadata.json"
 EMBED_MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
 
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 150
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 100
+MIN_CHUNK_SIZE = 50
 
 _model = None
 _index = None
@@ -31,16 +65,20 @@ def _ensure_dirs():
 
 # ---------- PDF -> Text ----------
 def pdf_to_text(pdf_path: str) -> str:
-    reader = PdfReader(pdf_path)
-    pages = []
-    for p in reader.pages:
-        try:
-            t = p.extract_text() or ""
-            if t.strip():
-                pages.append(t)
-        except Exception:
-            continue
-    return "\n".join(pages)
+    try:
+        reader = PdfReader(pdf_path)
+        pages = []
+        for p in reader.pages:
+            try:
+                t = p.extract_text() or ""
+                if t.strip():
+                    pages.append(t)
+            except Exception:
+                continue
+        return "\n".join(pages)
+    except Exception as e:
+        print(f"Error reading PDF {pdf_path}: {e}")
+        return ""
 
 # ---------- Chunking ----------
 def split_into_paragraphs(text: str):
@@ -50,8 +88,25 @@ def split_into_paragraphs(text: str):
 def chunk_text(text: str, mode: str = "sentence") -> List[str]:
     if not text:
         return []
+    
+    # Clean text first
+    text = re.sub(r'\s+', ' ', text.strip())
+    
     if mode == "sentence":
-        return [s.strip() for s in sent_tokenize(text) if s.strip()]
+        sentences = [s.strip() for s in sent_tokenize(text) if s.strip()]
+        # Group sentences into optimal chunks
+        chunks = []
+        current_chunk = ""
+        for sent in sentences:
+            if len(current_chunk) + len(sent) + 1 <= CHUNK_SIZE:
+                current_chunk += (" " if current_chunk else "") + sent
+            else:
+                if current_chunk and len(current_chunk) >= MIN_CHUNK_SIZE:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sent
+        if current_chunk and len(current_chunk) >= MIN_CHUNK_SIZE:
+            chunks.append(current_chunk.strip())
+        return chunks
     if mode == "paragraph":
         paras = split_into_paragraphs(text)
         chunks = []
@@ -73,9 +128,12 @@ def chunk_text(text: str, mode: str = "sentence") -> List[str]:
 def get_embedding_model():
     global _model, _dim
     if _model is None:
-        _model = SentenceTransformer(EMBED_MODEL_NAME)
-        test = _model.encode("hello", convert_to_numpy=True)
-        _dim = int(test.shape[-1])
+        try:
+            _model = SentenceTransformer(EMBED_MODEL_NAME)
+            test = _model.encode("hello", convert_to_numpy=True)
+            _dim = int(test.shape[-1])
+        except Exception as e:
+            raise RuntimeError(f"Failed to load embedding model: {e}")
     return _model
 
 # ---------- FAISS ----------
@@ -185,24 +243,38 @@ def retrieve(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
     model = get_embedding_model()
     index, metadata = _ensure_index_and_meta()
 
-    q_emb = model.encode([query], convert_to_numpy=True)  # 2D shape (1,d)
+    # Enhance query with context
+    enhanced_query = f"{query} retail business analytics"
+    
+    q_emb = model.encode([enhanced_query], convert_to_numpy=True)  # 2D shape (1,d)
     if q_emb.ndim == 1:
         q_emb = q_emb.reshape(1, -1)
     q_emb = q_emb.astype("float32")
     faiss.normalize_L2(q_emb)
 
-    D, I = index.search(q_emb, top_k)
+    # Retrieve more candidates for re-ranking
+    candidates = min(top_k * 3, len(metadata))
+    D, I = index.search(q_emb, candidates)
+    
     results = []
     for score, idx in zip(D[0], I[0]):
         if 0 <= int(idx) < len(metadata):
             entry = metadata[int(idx)]
+            # Apply relevance scoring based on text length and content
+            text_length = len(entry.get("text", ""))
+            length_penalty = 1.0 if text_length > MIN_CHUNK_SIZE else 0.5
+            adjusted_score = float(score) * length_penalty
+            
             results.append({
                 "id": entry["id"],
                 "document": entry["text"],
                 "metadata": {"source": entry["source"], "chunk_index": entry["chunk_index"]},
-                "score": float(score),
+                "score": adjusted_score,
             })
-    return results
+    
+    # Sort by adjusted score and return top_k
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_k]
 
 def build_rag_context(retrieved: List[Dict[str, Any]], max_chars: int = 2000) -> str:
     parts = []
