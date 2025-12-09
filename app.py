@@ -1,5 +1,6 @@
 # app.py
 import os
+import time
 import pandas as pd
 import streamlit as st
 
@@ -102,6 +103,7 @@ def run_question(q: str):
             result = orchestrate_query(q, schema, allowed, prev_turn)
 
         mode = result.get("type")
+        assistant_summary = ""
 
         # --- SQL ONLY ---
         if mode == "sql":
@@ -128,6 +130,199 @@ def run_question(q: str):
             with c2:
                 st.markdown("<div class='section-title'>Sources</div>", unsafe_allow_html=True)
                 render_doc_sources(out.get("sources", []))
+            assistant_summary = out.get("insight", "")
+
+        # --- AGENT ---
+        elif mode == "agent":
+            ao = result.get("agent_output", {})
+            st.markdown("#### Plan")
+            steps = ao.get("plan", [])
+            plan_lines = [f"- [{i+1}] {s.get('action','')} — {s.get('params',{})}" for i, s in enumerate(steps)]
+            st.markdown("\n".join(plan_lines))
+
+            st.markdown("#### Evidence")
+            step_results = ao.get("steps", [])
+            charts = ao.get("charts", {})
+            
+            # Enhanced evidence display with better charts
+            for s in step_results:
+                action_name = s.get('action', 'unknown')
+                success = s.get('success', False)
+                duration = int(s.get('duration_ms', 0))
+                status_icon = "✅" if success else "❌"
+                title = f"{status_icon} **{action_name.replace('_', ' ').title()}** ({duration} ms)"
+                
+                with st.expander(title, expanded=success):
+                    ev = s.get("evidence", {})
+                    
+                    # SQL evidence
+                    if ev.get("sql"):
+                        st.markdown("**SQL Query:**")
+                        st.code(ev.get("sql", ""), language="sql")
+                    
+                    # Time series analysis with enhanced chart
+                    if action_name == "check_trend":
+                        ts = ev.get("timeseries", {})
+                        if ts and not ts.get("error"):
+                            # Main chart
+                            chart_data = charts.get("timeseries", {})
+                            if chart_data and chart_data.get("period") and chart_data.get("value"):
+                                df_chart = pd.DataFrame({
+                                    "period": chart_data.get("period", []),
+                                    "value": chart_data.get("value", [])
+                                })
+                                if not df_chart.empty:
+                                    st.markdown("**Time Series Trend:**")
+                                    st.line_chart(df_chart.set_index("period"), use_container_width=True)
+                            
+                            # Metrics
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Trend", ts.get("trend", "unknown").title())
+                            with col2:
+                                change_pct = ts.get("change_last", 0.0) * 100
+                                st.metric("Last Period Change", f"{change_pct:.2f}%")
+                            with col3:
+                                anomalies = ts.get("anomalies", [])
+                                st.metric("Anomalies", len(anomalies))
+                            
+                            # Anomaly details
+                            if anomalies:
+                                st.markdown("**Detected Anomalies:**")
+                                anomaly_df = pd.DataFrame(anomalies)
+                                st.dataframe(anomaly_df[["period", "value", "z"]], use_container_width=True)
+                        else:
+                            st.warning(f"Time series analysis failed: {ts.get('error', 'Unknown error')}")
+                    
+                    # Breakdown analysis with bar chart
+                    elif action_name == "breakdown":
+                        bd = ev.get("breakdown", {})
+                        if bd and not bd.get("error"):
+                            rows = bd.get("rows", [])
+                            if rows:
+                                df_breakdown = pd.DataFrame(rows)
+                                st.markdown("**Breakdown by Dimension:**")
+                                
+                                # Bar chart
+                                if "value" in df_breakdown.columns:
+                                    chart_col = bd.get("by", "category")
+                                    if chart_col in df_breakdown.columns:
+                                        st.bar_chart(df_breakdown.set_index(chart_col)["value"], use_container_width=True)
+                                    else:
+                                        # Fallback: use first non-numeric column as index
+                                        index_col = [c for c in df_breakdown.columns if c != "value" and c != "contribution"][0] if len(df_breakdown.columns) > 1 else df_breakdown.columns[0]
+                                        st.bar_chart(df_breakdown.set_index(index_col)["value"], use_container_width=True)
+                                
+                                # Table with contribution percentages
+                                display_cols = [bd.get("by", "category"), "value"]
+                                if "contribution" in df_breakdown.columns:
+                                    display_cols.append("contribution")
+                                # Filter to only existing columns
+                                display_cols = [c for c in display_cols if c in df_breakdown.columns]
+                                st.dataframe(df_breakdown[display_cols], use_container_width=True)
+                            else:
+                                st.json(bd)
+                        else:
+                            error_reason = bd.get("reason", bd.get("error", "Unknown error")) if bd else "No breakdown data"
+                            st.warning(f"Breakdown failed: {error_reason}")
+                            if ev.get("sql"):
+                                st.code(ev.get("sql"), language="sql")
+                    
+                    # Policy/document retrieval
+                    elif action_name == "read_policy":
+                        ctx = ev.get("context", "")
+                        sources = ev.get("sources", [])
+                        if ctx:
+                            st.markdown("**Retrieved Context:**")
+                            st.text_area("", ctx[:2000], height=200, disabled=True, label_visibility="collapsed")
+                        if sources:
+                            st.markdown("**Document Sources:**")
+                            render_doc_sources(sources)
+                    
+                    # Promo comparison
+                    elif action_name == "compare_promo":
+                        corr = ev.get("corr_sales_promo", 0.0)
+                        st.metric("Sales-Promotion Correlation", f"{corr:.3f}")
+                        if abs(corr) > 0.3:
+                            st.info(f"Strong {'positive' if corr > 0 else 'negative'} correlation detected.")
+                        else:
+                            st.info("Weak correlation - promotions may not be a major factor.")
+                    
+                    # What-if scenario
+                    elif action_name == "what_if":
+                        wi = ev.get("what_if", {})
+                        if wi:
+                            base = wi.get("base", 0.0)
+                            pct = wi.get("pct", 0.0) * 100
+                            new_val = wi.get("new", 0.0)
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Base Value", f"{base:,.2f}")
+                            with col2:
+                                st.metric(f"With {pct:.1f}% Change", f"{new_val:,.2f}")
+                            st.info(f"Counterfactual: If KPI changes by {pct:.1f}%, new value would be {new_val:,.2f}")
+                    
+                    # Error display
+                    if not success and s.get("error"):
+                        st.error(f"Error: {s.get('error')}")
+
+            st.markdown("#### Conclusion")
+            st.markdown(f"<div class='card'>{ao.get('conclusion','')}</div>", unsafe_allow_html=True)
+
+            recs = ao.get("recommendations", "")
+            if recs:
+                st.markdown("#### Recommendations")
+                st.markdown(f"<div class='card'>{recs}</div>", unsafe_allow_html=True)
+
+            conf = float(ao.get("confidence", 0))
+            st.markdown("#### Confidence Score")
+            conf_threshold = 0.55
+            conf_pct = conf * 100
+            
+            # Visual confidence indicator
+            if conf < conf_threshold:
+                st.warning(f"⚠️ **{conf_pct:.1f}%** - Below threshold ({conf_threshold*100:.0f}%)")
+                st.caption("Review findings carefully. Consider additional analysis.")
+            elif conf < 0.75:
+                st.info(f"ℹ️ **{conf_pct:.1f}%** - Moderate confidence")
+            else:
+                st.success(f"✅ **{conf_pct:.1f}%** - High confidence")
+            
+            # Confidence breakdown (if available in logs)
+            with st.expander("Confidence Details"):
+                st.write(f"**Score:** {conf:.3f}")
+                st.write(f"**Threshold:** {conf_threshold:.2f}")
+                st.write(f"**Status:** {'Above threshold' if conf >= conf_threshold else 'Below threshold'}")
+                st.caption("Confidence is calculated based on step success rate, evidence quality, and analysis depth.")
+
+            st.markdown("<div class='section-title'>Citations</div>", unsafe_allow_html=True)
+            render_doc_sources(ao.get("citations", []))
+
+            # Enhanced report display
+            rep = ao.get("report_md", "")
+            if rep:
+                st.markdown("---")
+                st.markdown("#### 📄 Auto-Generated Report")
+                with st.expander("View Full Report", expanded=False):
+                    st.markdown(rep)
+                st.download_button(
+                    "📥 Download Report (Markdown)", 
+                    rep.encode("utf-8"), 
+                    f"kpi_report_{int(time.time())}.md", 
+                    mime="text/markdown"
+                )
+            
+            # Logs download
+            log_path = "agent_logs.jsonl"
+            if os.path.exists(log_path):
+                with open(log_path, "rb") as f:
+                    st.download_button(
+                        "🗂️ Download JSON Logs", 
+                        f.read(), 
+                        f"agent_logs_{int(time.time())}.jsonl",
+                        mime="application/jsonl"
+                    )
+            assistant_summary = (ao.get("conclusion","") + "\n" + ao.get("recommendations",""))
 
         # --- DOCS ONLY ---
         elif mode == "doc":
@@ -169,11 +364,11 @@ def run_question(q: str):
             with st.expander("Show retrieved evidence (optional)"):
                 st.caption("These are the exact text snippets used for grounding.")
                 st.code(doc_out.get("context_text",""), language="text")
+            assistant_summary = result.get("merged", "")
 
         # Save turn
         st.session_state.turns.insert(0, {"q": q, "result": result})
-        # We store a short text, not the whole dict (keeps history clean)
-        st.session_state.messages.append({"role": "assistant", "content": result.get("merged") or out.get("insight","") or "(See above)"})
+        st.session_state.messages.append({"role": "assistant", "content": assistant_summary or "(See above)"})
 
 # ---- Sidebar ----
 with st.sidebar:

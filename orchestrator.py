@@ -3,6 +3,7 @@
 from db_layer import connect_db, run_sql as run_sql_db
 from rag_layer import retrieve, build_rag_context, has_indexed_docs
 from genai_layer import nl_to_sql_and_insight, build_insight_prompt, llm_summarize
+from agent import run_agent
 
 import pandas as pd
 import re
@@ -13,6 +14,23 @@ def detect_intent(q: str) -> str:
     ql = q.lower().strip()
     
     print(f"Detecting intent for: {q}")
+    
+    # Agentic diagnosis patterns (root-cause, drop detection, what-if)
+    agent_triggers = [
+        r"\bwhy\b", r"\broot cause\b", r"\bdriver[s]?\b", r"\battribution\b",
+        r"\bdiagnos[e|is]", r"\binvestigat[e|ion]", r"\bdrill( |-)?down\b",
+        r"\bwhat if\b", r"\bcounterfactual\b", r"\bsimulat(e|ion)\b",
+        r"\banomal(y|ies)\b", r"\bspike\b", r"\bdip\b", r"\bchange\b", r"\bdrop|decline|decrease\b"
+    ]
+    agent_kpis = [
+        r"sales", r"revenue", r"gmv", r"orders", r"order", r"margin", r"profit",
+        r"conversion", r"aov", r"traffic", r"units", r"kpi"
+    ]
+    agent_score = sum(1 for p in agent_triggers if re.search(p, ql))
+    kpi_score = sum(1 for p in agent_kpis if re.search(rf"\b{p}\b", ql))
+    if agent_score >= 1 and kpi_score >= 1:
+        print("Agentic diagnosis intent detected → Agent")
+        return "agent"
     
     # Check for explicit hybrid indicators first
     hybrid_indicators = [
@@ -292,6 +310,10 @@ def orchestrate_query(q, schema, allowed, prev=None):
     
     intent = detect_intent(q)
     print(f"Detected intent: {intent}")
+
+    if intent == "agent":
+        print("→ Routing to Agent pipeline")
+        return {"type": "agent", "agent_output": run_agent(q, schema, allowed, prev)}
 
     if intent == "sql":
         print("→ Routing to SQL pipeline")
