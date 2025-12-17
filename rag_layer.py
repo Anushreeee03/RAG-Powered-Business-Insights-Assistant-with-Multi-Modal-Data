@@ -277,15 +277,11 @@ def retrieve(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
     return results[:top_k]
 
 def build_rag_context(retrieved: List[Dict[str, Any]], max_chars: int = 2000) -> str:
-    """Build context string from retrieved documents."""
-    if not retrieved:
-        return ""
     parts = []
     for r in retrieved:
         src = r.get("metadata", {}).get("source", "unknown")
         idx = r.get("metadata", {}).get("chunk_index", -1)
         doc = r.get("document", "").strip()
-        if doc:  # Only add non-empty documents
-            parts.append(f"[{src} #chunk {idx}] {doc}\n---\n")
+        parts.append(f"[{src} #chunk {idx}] {doc}\n---\n")
     text = "".join(parts)
     return text if len(text) <= max_chars else text[:max_chars] + "\n[TRUNCATED]"

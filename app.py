@@ -1,6 +1,5 @@
 # app.py
 import os
-import time
 import pandas as pd
 import streamlit as st
 
@@ -31,6 +30,80 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
+# ---- Lightweight usage & health metrics ----
+def load_agent_metrics(log_path: str = "agent_logs.jsonl", max_events: int = 500):
+    if not os.path.exists(log_path):
+        return {
+            "sessions": 0,
+            "avg_duration_ms": None,
+            "avg_confidence": None,
+            "success_rate": None,
+        }
+    sessions = 0
+    durations = []
+    confidences = []
+    success_flags = []
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= max_events:
+                    break
+                try:
+                    ev = json.loads(line.strip())
+                except Exception:
+                    continue
+                if ev.get("type") == "session_complete":
+                    sessions += 1
+                    if "duration_ms" in ev:
+                        durations.append(float(ev.get("duration_ms", 0)))
+                    if "confidence" in ev:
+                        confidences.append(float(ev.get("confidence", 0)))
+                    if "steps_total" in ev and ev.get("steps_total"):
+                        success_flags.append(
+                            float(ev.get("steps_completed", 0)) / float(ev.get("steps_total", 1))
+                        )
+    except Exception:
+        return {
+            "sessions": 0,
+            "avg_duration_ms": None,
+            "avg_confidence": None,
+            "success_rate": None,
+        }
+
+    def _avg(lst):
+        return (sum(lst) / len(lst)) if lst else None
+
+    return {
+        "sessions": sessions,
+        "avg_duration_ms": _avg(durations),
+        "avg_confidence": _avg(confidences),
+        "success_rate": _avg(success_flags),
+    }
+
+
+def connection_health():
+    """Basic stability checks for DB + RAG + LLM config (no external calls)."""
+    db_ok = False
+    schema_ok = False
+    try:
+        con = connect_db()
+        _schema = introspect_schema(con)
+        db_ok = True
+        schema_ok = bool(_schema)
+    except Exception:
+        pass
+
+    rag_ok = has_indexed_docs()
+    llm_ok = bool(os.getenv("GROQ_API_KEY") or (hasattr(st, "secrets") and st.secrets.get("GROQ_API_KEY")))
+
+    return {
+        "db_ok": db_ok,
+        "schema_ok": schema_ok,
+        "rag_ok": rag_ok,
+        "llm_ok": llm_ok,
+    }
+
 # ---- API key check ----
 groq_key = os.getenv("GROQ_API_KEY") or (hasattr(st, "secrets") and st.secrets.get("GROQ_API_KEY"))
 
@@ -55,6 +128,10 @@ if "chunk_mode" not in st.session_state:
 
 schema = st.session_state.schema
 allowed = st.session_state.allowed
+
+# Pre-compute health + usage insights for landing page and sidebar
+health = connection_health()
+metrics = load_agent_metrics()
 
 # ---- Helpers ----
 def short_title(text: str, max_words: int = 8) -> str:
@@ -143,128 +220,35 @@ def run_question(q: str):
             st.markdown("#### Evidence")
             step_results = ao.get("steps", [])
             charts = ao.get("charts", {})
-            
-            # Enhanced evidence display with better charts
             for s in step_results:
-                action_name = s.get('action', 'unknown')
-                success = s.get('success', False)
-                duration = int(s.get('duration_ms', 0))
-                status_icon = "✅" if success else "❌"
-                title = f"{status_icon} **{action_name.replace('_', ' ').title()}** ({duration} ms)"
-                
-                with st.expander(title, expanded=success):
+                title = f"[{s.get('action','')}] {'✅' if s.get('success') else '❌'} ({int(s.get('duration_ms',0))} ms)"
+                with st.expander(title, expanded=False):
                     ev = s.get("evidence", {})
-                    
-                    # SQL evidence
                     if ev.get("sql"):
-                        st.markdown("**SQL Query:**")
-                        st.code(ev.get("sql", ""), language="sql")
-                    
-                    # Time series analysis with enhanced chart
-                    if action_name == "check_trend":
-                        ts = ev.get("timeseries", {})
-                        if ts and not ts.get("error"):
-                            # Main chart
-                            chart_data = charts.get("timeseries", {})
-                            if chart_data and chart_data.get("period") and chart_data.get("value"):
-                                df_chart = pd.DataFrame({
-                                    "period": chart_data.get("period", []),
-                                    "value": chart_data.get("value", [])
-                                })
-                                if not df_chart.empty:
-                                    st.markdown("**Time Series Trend:**")
-                                    st.line_chart(df_chart.set_index("period"), use_container_width=True)
-                            
-                            # Metrics
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Trend", ts.get("trend", "unknown").title())
-                            with col2:
-                                change_pct = ts.get("change_last", 0.0) * 100
-                                st.metric("Last Period Change", f"{change_pct:.2f}%")
-                            with col3:
-                                anomalies = ts.get("anomalies", [])
-                                st.metric("Anomalies", len(anomalies))
-                            
-                            # Anomaly details
-                            if anomalies:
-                                st.markdown("**Detected Anomalies:**")
-                                anomaly_df = pd.DataFrame(anomalies)
-                                st.dataframe(anomaly_df[["period", "value", "z"]], use_container_width=True)
-                        else:
-                            st.warning(f"Time series analysis failed: {ts.get('error', 'Unknown error')}")
-                    
-                    # Breakdown analysis with bar chart
-                    elif action_name == "breakdown":
+                        st.code(ev.get("sql",""), language="sql")
+                    if s.get("action") == "check_trend":
+                        ts = charts.get("timeseries", {})
+                        if ts and ts.get("period") and ts.get("value"):
+                            df_chart = pd.DataFrame({"period": ts.get("period", []), "value": ts.get("value", [])})
+                            if not df_chart.empty:
+                                st.line_chart(df_chart.set_index("period"))
+                        st.json(ev.get("timeseries", {}))
+                    if s.get("action") == "breakdown":
                         bd = ev.get("breakdown", {})
-                        if bd and not bd.get("error"):
-                            rows = bd.get("rows", [])
-                            if rows:
-                                df_breakdown = pd.DataFrame(rows)
-                                st.markdown("**Breakdown by Dimension:**")
-                                
-                                # Bar chart
-                                if "value" in df_breakdown.columns:
-                                    chart_col = bd.get("by", "category")
-                                    if chart_col in df_breakdown.columns:
-                                        st.bar_chart(df_breakdown.set_index(chart_col)["value"], use_container_width=True)
-                                    else:
-                                        # Fallback: use first non-numeric column as index
-                                        index_col = [c for c in df_breakdown.columns if c != "value" and c != "contribution"][0] if len(df_breakdown.columns) > 1 else df_breakdown.columns[0]
-                                        st.bar_chart(df_breakdown.set_index(index_col)["value"], use_container_width=True)
-                                
-                                # Table with contribution percentages
-                                display_cols = [bd.get("by", "category"), "value"]
-                                if "contribution" in df_breakdown.columns:
-                                    display_cols.append("contribution")
-                                # Filter to only existing columns
-                                display_cols = [c for c in display_cols if c in df_breakdown.columns]
-                                st.dataframe(df_breakdown[display_cols], use_container_width=True)
-                            else:
-                                st.json(bd)
+                        rows = bd.get("rows", [])
+                        if rows:
+                            st.dataframe(pd.DataFrame(rows))
                         else:
-                            error_reason = bd.get("reason", bd.get("error", "Unknown error")) if bd else "No breakdown data"
-                            st.warning(f"Breakdown failed: {error_reason}")
-                            if ev.get("sql"):
-                                st.code(ev.get("sql"), language="sql")
-                    
-                    # Policy/document retrieval
-                    elif action_name == "read_policy":
+                            st.json(bd)
+                    if s.get("action") == "read_policy":
                         ctx = ev.get("context", "")
-                        sources = ev.get("sources", [])
                         if ctx:
-                            st.markdown("**Retrieved Context:**")
-                            st.text_area("", ctx[:2000], height=200, disabled=True, label_visibility="collapsed")
-                        if sources:
-                            st.markdown("**Document Sources:**")
-                            render_doc_sources(sources)
-                    
-                    # Promo comparison
-                    elif action_name == "compare_promo":
-                        corr = ev.get("corr_sales_promo", 0.0)
-                        st.metric("Sales-Promotion Correlation", f"{corr:.3f}")
-                        if abs(corr) > 0.3:
-                            st.info(f"Strong {'positive' if corr > 0 else 'negative'} correlation detected.")
-                        else:
-                            st.info("Weak correlation - promotions may not be a major factor.")
-                    
-                    # What-if scenario
-                    elif action_name == "what_if":
-                        wi = ev.get("what_if", {})
-                        if wi:
-                            base = wi.get("base", 0.0)
-                            pct = wi.get("pct", 0.0) * 100
-                            new_val = wi.get("new", 0.0)
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.metric("Base Value", f"{base:,.2f}")
-                            with col2:
-                                st.metric(f"With {pct:.1f}% Change", f"{new_val:,.2f}")
-                            st.info(f"Counterfactual: If KPI changes by {pct:.1f}%, new value would be {new_val:,.2f}")
-                    
-                    # Error display
-                    if not success and s.get("error"):
-                        st.error(f"Error: {s.get('error')}")
+                            st.code(ctx[:1000], language="text")
+                        render_doc_sources(ev.get("sources", []))
+                    if s.get("action") == "compare_promo":
+                        st.write(f"Correlation sales vs promo: {round(ev.get('corr_sales_promo',0),2)}")
+                    if s.get("action") == "what_if":
+                        st.json(ev.get("what_if", {}))
 
             st.markdown("#### Conclusion")
             st.markdown(f"<div class='card'>{ao.get('conclusion','')}</div>", unsafe_allow_html=True)
@@ -275,53 +259,21 @@ def run_question(q: str):
                 st.markdown(f"<div class='card'>{recs}</div>", unsafe_allow_html=True)
 
             conf = float(ao.get("confidence", 0))
-            st.markdown("#### Confidence Score")
-            conf_threshold = 0.55
-            conf_pct = conf * 100
-            
-            # Visual confidence indicator
-            if conf < conf_threshold:
-                st.warning(f"⚠️ **{conf_pct:.1f}%** - Below threshold ({conf_threshold*100:.0f}%)")
-                st.caption("Review findings carefully. Consider additional analysis.")
-            elif conf < 0.75:
-                st.info(f"ℹ️ **{conf_pct:.1f}%** - Moderate confidence")
+            st.markdown("#### Confidence")
+            if conf < 0.55:
+                st.warning(f"Low confidence: {conf}")
             else:
-                st.success(f"✅ **{conf_pct:.1f}%** - High confidence")
-            
-            # Confidence breakdown (if available in logs)
-            with st.expander("Confidence Details"):
-                st.write(f"**Score:** {conf:.3f}")
-                st.write(f"**Threshold:** {conf_threshold:.2f}")
-                st.write(f"**Status:** {'Above threshold' if conf >= conf_threshold else 'Below threshold'}")
-                st.caption("Confidence is calculated based on step success rate, evidence quality, and analysis depth.")
+                st.success(f"Confidence: {conf}")
 
             st.markdown("<div class='section-title'>Citations</div>", unsafe_allow_html=True)
             render_doc_sources(ao.get("citations", []))
 
-            # Enhanced report display
             rep = ao.get("report_md", "")
             if rep:
-                st.markdown("---")
-                st.markdown("#### 📄 Auto-Generated Report")
-                with st.expander("View Full Report", expanded=False):
-                    st.markdown(rep)
-                st.download_button(
-                    "📥 Download Report (Markdown)", 
-                    rep.encode("utf-8"), 
-                    f"kpi_report_{int(time.time())}.md", 
-                    mime="text/markdown"
-                )
-            
-            # Logs download
+                st.download_button("📄 Download Report (MD)", rep.encode("utf-8"), "report.md", mime="text/markdown")
             log_path = "agent_logs.jsonl"
             if os.path.exists(log_path):
-                with open(log_path, "rb") as f:
-                    st.download_button(
-                        "🗂️ Download JSON Logs", 
-                        f.read(), 
-                        f"agent_logs_{int(time.time())}.jsonl",
-                        mime="application/jsonl"
-                    )
+                st.download_button("🗂️ Download JSON Logs", open(log_path, "rb"), "agent_logs.jsonl")
             assistant_summary = (ao.get("conclusion","") + "\n" + ao.get("recommendations",""))
 
         # --- DOCS ONLY ---
@@ -370,47 +322,148 @@ def run_question(q: str):
         st.session_state.turns.insert(0, {"q": q, "result": result})
         st.session_state.messages.append({"role": "assistant", "content": assistant_summary or "(See above)"})
 
-# ---- Sidebar ----
-with st.sidebar:
-    st.subheader("Conversation History")
-    for i, t in enumerate(st.session_state.turns[:16], 1):
-        label = short_title(t["q"])
-        if st.button(label, key=f"hist_{i}"):
-            st.session_state.pending_q = t["q"]
-            st.rerun()
 
-    st.markdown("---")
-    st.subheader("RAG Index")
-    st.caption("Place PDFs in ./docs/")
-    st.write(f"Index status: {'✅ Ready' if has_indexed_docs() else '⚠️ Not built'}")
+# ---- Layout: Overview + Assistant ----
+tab_overview, tab_assistant = st.tabs(["Overview & How to Use", "Assistant"])
 
-    mode = st.radio("Chunking", ["sentence", "paragraph"],
-                    index=0 if st.session_state.chunk_mode == "sentence" else 1,
-                    key="chunk_mode")
-    if st.button("Rebuild Index"):
-        with st.spinner("Indexing PDFs..."):
-            info = ingest_pdfs_from_docs_dir(rebuild=True, mode=mode)
-        st.success("Index rebuilt.")
-        with st.expander("Index details"):
-            st.write(info)
+with tab_overview:
+    st.markdown("### What this tool does")
+    st.markdown(
+        """
+**Retail Data + Policy Assistant** is a business-analytics copilot that:
+- **Turns natural language questions into SQL** over your retail star-schema
+- **Combines data + policy documents** using RAG to answer "why" and "how" questions
+- **Runs an agentic root-cause investigation** for KPI drops (trend → breakdown → documents → what‑if)
+- **Generates an executive summary and a downloadable report** with confidence scores and citations
+        """
+    )
 
-    if st.button("Clear history"):
-        st.session_state.messages.clear()
-        st.session_state.turns.clear()
-        st.success("History cleared.")
+    st.markdown("### Who should use it")
+    st.markdown(
+        """
+- **Business analysts** who need quick, explainable KPI deep dives  
+- **Revenue / sales leaders** tracking performance and promotions  
+- **Operations / strategy teams** validating policies against actual results  
+- **Data-curious PMs** who know the questions but not the SQL
+        """
+    )
 
-# ---- Previous messages ----
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+    st.markdown("### Sample prompts")
+    st.markdown(
+        """
+- **KPI diagnosis**:  
+  - "Why did sales drop last quarter?"  
+  - "Investigate the root cause of the orders decline by region and category."
+- **What‑if & scenario planning**:  
+  - "What if sales increased by 10% next month?"  
+  - "How would revenue change if we reduced discounts by 5%?"
+- **SQL-style questions** (data only):  
+  - "Show top 10 products by sales."  
+  - "List sales by customer segment and region."
+- **Policy / docs questions**:  
+  - "What is the return policy for electronics?"  
+  - "Summarize our discount strategy."
+        """
+    )
 
-# ---- Run pending question from history ----
-if st.session_state.pending_q:
-    q = st.session_state.pending_q
-    st.session_state.pending_q = None
-    run_question(q)
+    st.markdown("### FAQs & known limitations")
+    st.markdown(
+        """
+- **Does it modify my database?**  
+  - No. It only runs **read‑only `WITH`/`SELECT` queries** with strict safety checks.
+- **What data does it see?**  
+  - Only the connected SQLite DB (`salesDw.db`) and PDFs inside the `docs/` folder.
+- **How reliable are answers?**  
+  - Each agent run gets a **confidence score**; low scores show a warning and you should double‑check the evidence.
+- **What about PII?**  
+  - Logs and summaries apply **PII redaction** for emails, phones, SSNs, cards, and more, but you should avoid pasting raw sensitive data.
+- **Model & latency**  
+  - Uses a remote LLM (Groq); responses depend on network + API latency, typically a few seconds per full analysis.
+        """
+    )
 
-# ---- Chat input ----
-user_q = st.chat_input("Ask about sales (SQL), policies or strategy (Docs), or combine both…")
-if user_q:
-    run_question(user_q)
+    st.markdown("### System status & usage insights")
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("DB connection", "OK" if health["db_ok"] else "Failed")
+        st.caption("Checks `salesDw.db` and schema.")
+    with cols[1]:
+        st.metric("RAG index", "Ready" if health["rag_ok"] else "Not built")
+        st.caption("PDFs indexed from `docs/`.")
+    with cols[2]:
+        st.metric("LLM configured", "Yes" if health["llm_ok"] else "Missing")
+        st.caption("Requires `GROQ_API_KEY`.")
+    with cols[3]:
+        st.metric("Sessions (logged)", metrics["sessions"])
+        avg_ms = metrics["avg_duration_ms"]
+        if avg_ms:
+            st.caption(f"Avg duration: {avg_ms/1000:.1f}s")
+
+    if metrics["avg_confidence"] is not None or metrics["success_rate"] is not None:
+        c1, c2 = st.columns(2)
+        with c1:
+            if metrics["avg_confidence"] is not None:
+                st.metric("Avg confidence", f"{metrics['avg_confidence']*100:.1f}%")
+        with c2:
+            if metrics["success_rate"] is not None:
+                st.metric("Avg tool success", f"{metrics['success_rate']*100:.1f}%")
+
+    st.info(
+        "When you're ready, switch to the **Assistant** tab, ask a question like "
+        "\"Why did sales drop?\", and follow the plan/evidence/conclusion flow."
+    )
+
+with tab_assistant:
+    # ---- Sidebar ----
+    with st.sidebar:
+        st.subheader("Conversation History")
+        for i, t in enumerate(st.session_state.turns[:16], 1):
+            label = short_title(t["q"])
+            if st.button(label, key=f"hist_{i}"):
+                st.session_state.pending_q = t["q"]
+                st.rerun()
+
+        st.markdown("---")
+        st.subheader("RAG Index")
+        st.caption("Place PDFs in ./docs/")
+        st.write(f"Index status: {'✅ Ready' if has_indexed_docs() else '⚠️ Not built'}")
+
+        mode = st.radio("Chunking", ["sentence", "paragraph"],
+                        index=0 if st.session_state.chunk_mode == "sentence" else 1,
+                        key="chunk_mode")
+        if st.button("Rebuild Index"):
+            with st.spinner("Indexing PDFs..."):
+                info = ingest_pdfs_from_docs_dir(rebuild=True, mode=mode)
+            st.success("Index rebuilt.")
+            with st.expander("Index details"):
+                st.write(info)
+
+        st.markdown("---")
+        st.subheader("Health snapshot")
+        st.caption("Last app refresh")
+        st.write(f"DB: {'✅' if health['db_ok'] else '⚠️'} | "
+                 f"Schema: {'✅' if health['schema_ok'] else '⚠️'} | "
+                 f"RAG: {'✅' if health['rag_ok'] else '⚠️'}")
+        if metrics["avg_confidence"] is not None:
+            st.write(f"Avg conf: {metrics['avg_confidence']*100:.0f}%")
+
+        if st.button("Clear history"):
+            st.session_state.messages.clear()
+            st.session_state.turns.clear()
+            st.success("History cleared.")
+
+    # ---- Previous messages ----
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # ---- Run pending question from history ----
+    if st.session_state.pending_q:
+        q = st.session_state.pending_q
+        st.session_state.pending_q = None
+        run_question(q)
+
+    # ---- Chat input ----
+    user_q = st.chat_input("Ask about sales (SQL), policies or strategy (Docs), or combine both…")
+    if user_q:
+        run_question(user_q)

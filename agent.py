@@ -284,24 +284,16 @@ class SQLTool:
     def timeseries_sql(self, kpi: str = "sales", granularity: str = "month") -> str:
         k = kpi.lower()
         agg = "SUM(f.Sales) AS value" if k in ("sales", "revenue", "gmv") else "COUNT(DISTINCT f.Order_ID) AS value"
-        
-        # Handle date format: dates are stored as DD/MM/YYYY, need to convert for strftime
-        # Use substr to extract parts: substr(Order_Date, 7, 4) gets year, substr(Order_Date, 4, 2) gets month
         if granularity == "month":
-            per = "substr(d.Order_Date, 7, 4) || '-' || substr('0' || substr(d.Order_Date, 4, 2), -2) AS period"
+            per = "strftime('%Y-%m', d.Order_Date) AS period"
         elif granularity == "week":
-            # For week, convert to date first then use strftime
-            per = "strftime('%Y-%W', substr(d.Order_Date, 7, 4) || '-' || substr('0' || substr(d.Order_Date, 4, 2), -2) || '-' || substr('0' || substr(d.Order_Date, 1, 2), -2)) AS period"
+            per = "strftime('%Y-%W', d.Order_Date) AS period"
         else:
-            # For day, convert DD/MM/YYYY to YYYY-MM-DD format
-            per = "substr(d.Order_Date, 7, 4) || '-' || substr('0' || substr(d.Order_Date, 4, 2), -2) || '-' || substr('0' || substr(d.Order_Date, 1, 2), -2) AS period"
-        
+            per = "strftime('%Y-%m-%d', d.Order_Date) AS period"
         sql = (
             f"SELECT {per}, {agg} "
             "FROM FactSales f JOIN DimDate d ON f.Date_ID = d.Date_ID "
-            "WHERE d.Order_Date IS NOT NULL AND d.Order_Date != '' "
-            "GROUP BY period HAVING period IS NOT NULL AND period != '' "
-            "ORDER BY period"
+            "GROUP BY period ORDER BY period"
         )
         return sql
 
@@ -331,22 +323,14 @@ class RAGTool:
 class TimeSeriesTool:
     def analyze(self, df: pd.DataFrame, period_col: str = "period", value_col: str = "value") -> Dict[str, Any]:
         if df is None or df.empty or period_col not in df.columns or value_col not in df.columns:
-            return {"error": "invalid_timeseries", "reason": f"Missing columns. Got: {list(df.columns) if df is not None and not df.empty else 'empty'}"}
+            return {"error": "invalid_timeseries"}
         dfx = df[[period_col, value_col]].copy()
-        
-        # Convert value to numeric first, then drop nulls
-        dfx[value_col] = pd.to_numeric(dfx[value_col], errors="coerce")
-        
-        # Handle period column - convert to string, but keep None as None for now
-        dfx[period_col] = dfx[period_col].astype(str)
-        # Replace 'None' string with actual None, then drop
-        dfx[period_col] = dfx[period_col].replace('None', None).replace('nan', None)
-        
-        # Drop rows where either period or value is null
         dfx = dfx.dropna()
-        
+        dfx[period_col] = dfx[period_col].astype(str)
+        dfx[value_col] = pd.to_numeric(dfx[value_col], errors="coerce")
+        dfx = dfx.dropna()
         if dfx.empty:
-            return {"error": "no_numeric", "reason": f"After processing, no valid rows. Original shape: {df.shape}, Value nulls: {df[value_col].isna().sum()}, Period nulls: {(df[period_col].isna() | (df[period_col].astype(str) == 'None')).sum()}"}
+            return {"error": "no_numeric"}
         y = dfx[value_col].values.astype(float)
         x = np.arange(len(y))
         slope = float(np.polyfit(x, y, 1)[0]) if len(y) >= 2 else 0.0
@@ -385,22 +369,11 @@ class CalcTool:
             value_col = num_cols[0]
         
         try:
-            # Clean the 'by' column - replace None/NaN with 'Unknown'
-            df_clean = df.copy()
-            df_clean[by] = df_clean[by].fillna('Unknown').astype(str).replace('None', 'Unknown').replace('nan', 'Unknown')
-            
-            agg = df_clean.groupby(by)[value_col].sum().reset_index().sort_values(value_col, ascending=False)
+            agg = df.groupby(by)[value_col].sum().reset_index().sort_values(value_col, ascending=False)
             total = float(agg[value_col].sum() or 0.0)
             rows = agg.head(10).to_dict(orient="records")
-            
-            # Ensure each row has the 'by' column name in the dict
             for r in rows:
-                # The row already has the 'by' column, but ensure it's accessible
                 r["contribution"] = float((r[value_col] / (total + 1e-9)) * 100.0)
-                # Also store under the actual column name for easier access
-                if by not in r:
-                    r[by] = r.get(by, "Unknown")
-            
             return {"by": by, "value_col": value_col, "rows": rows, "total": total}
         except Exception as e:
             return {"error": "breakdown_calculation_failed", "reason": str(e)}
@@ -501,25 +474,13 @@ class Executor:
                             raise ValueError(f"Missing expected columns. Got: {list(df.columns)}")
                         
                         # Rename column to match the breakdown parameter
-                        # Rename column to match the breakdown parameter
                         df_renamed = df.rename(columns={"by_col": by})
-                        
-                        # Ensure the renamed column exists
-                        if by not in df_renamed.columns:
-                            # Try alternative: keep original column name if rename failed
-                            if "by_col" in df_renamed.columns:
-                                by = "by_col"
-                            else:
-                                raise ValueError(f"Could not find breakdown column. Available: {list(df_renamed.columns)}")
-                        
                         calc_res = self.calc.breakdown(df_renamed, by=by, value_col="value")
                         
                         if calc_res.get("error"):
                             raise ValueError(f"Breakdown calculation failed: {calc_res.get('error')}")
                         
                         breakdown_rows = calc_res.get("rows", [])
-                        # Store the actual column name used in the result
-                        calc_res["by"] = by  # Ensure 'by' matches what's in the rows
                         ev = {"sql": sql, "breakdown": calc_res}
                         step_results.append(StepResult(step.id, step.action, True, (time.time()-t0)*1000, ev))
                     except Exception as e:
@@ -547,27 +508,11 @@ class Executor:
                         error_msg = _safe_to_str(e)
                         step_results.append(StepResult(step.id, step.action, False, (time.time()-t0)*1000, {"error": error_msg}, error_msg))
                 elif step.action == "what_if":
-                    try:
-                        pct = float(step.params.get("pct", 0.05))
-                        # Try to get base value from last time series, or from breakdown total
-                        base = float(last_ts_value or 0.0)
-                        if base == 0.0 and breakdown_rows:
-                            # Fallback: use total from most recent breakdown
-                            base = float(breakdown_rows[0].get("total", 0.0) if breakdown_rows else 0.0)
-                        if base == 0.0:
-                            # Last resort: try to get from any successful step's evidence
-                            for prev_step in step_results:
-                                if prev_step.success:
-                                    bd = prev_step.evidence.get("breakdown", {})
-                                    if bd and bd.get("total"):
-                                        base = float(bd.get("total", 0.0))
-                                        break
-                        what = self.calc.what_if(base, pct)
-                        ev = {"what_if": what, "base_source": "timeseries" if last_ts_value else "breakdown" if breakdown_rows else "none"}
-                        step_results.append(StepResult(step.id, step.action, True, (time.time()-t0)*1000, ev))
-                    except Exception as e:
-                        error_msg = _safe_to_str(e)
-                        step_results.append(StepResult(step.id, step.action, False, (time.time()-t0)*1000, {"error": error_msg}, error_msg))
+                    pct = float(step.params.get("pct", 0.05))
+                    base = float(last_ts_value or 0.0)
+                    what = self.calc.what_if(base, pct)
+                    ev = {"what_if": what}
+                    step_results.append(StepResult(step.id, step.action, True, (time.time()-t0)*1000, ev))
                 elif step.action == "finalize":
                     step_results.append(StepResult(step.id, step.action, True, (time.time()-t0)*1000, {}))
                 else:
