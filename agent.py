@@ -399,6 +399,7 @@ class Executor:
         evidence_texts: List[str] = []
         last_ts_value: Optional[float] = None
         breakdown_rows: List[Dict[str, Any]] = []
+        breakdown_total: Optional[float] = None
 
         for step in plan:
             t0 = time.time()
@@ -407,6 +408,18 @@ class Executor:
                     try:
                         sql = self.sql.timeseries_sql(step.params.get("kpi", "sales"), step.params.get("granularity", "month"))
                         df = self.sql.run_sql(sql)
+                        # Fallback: if empty, try SalesDataMart if available
+                        if df.empty:
+                            alt_sql = (
+                                "SELECT strftime('%Y-%m', d.Order_Date) AS period, "
+                                "SUM(v.Sales) AS value "
+                                "FROM SalesDataMart v JOIN DimDate d ON v.Date_ID = d.Date_ID "
+                                "GROUP BY period ORDER BY period"
+                            )
+                            df_alt = self.sql.run_sql(alt_sql)
+                            if not df_alt.empty:
+                                sql = alt_sql
+                                df = df_alt
                         if df.empty:
                             raise ValueError("Time series query returned no results")
                         ts_res = self.ts.analyze(df, period_col="period", value_col="value")
@@ -481,6 +494,7 @@ class Executor:
                             raise ValueError(f"Breakdown calculation failed: {calc_res.get('error')}")
                         
                         breakdown_rows = calc_res.get("rows", [])
+                        breakdown_total = calc_res.get("total", breakdown_total)
                         ev = {"sql": sql, "breakdown": calc_res}
                         step_results.append(StepResult(step.id, step.action, True, (time.time()-t0)*1000, ev))
                     except Exception as e:
@@ -509,7 +523,9 @@ class Executor:
                         step_results.append(StepResult(step.id, step.action, False, (time.time()-t0)*1000, {"error": error_msg}, error_msg))
                 elif step.action == "what_if":
                     pct = float(step.params.get("pct", 0.05))
-                    base = float(last_ts_value or 0.0)
+                    # Prefer last time-series value; fallback to breakdown total if available
+                    base_val = last_ts_value if last_ts_value is not None else breakdown_total
+                    base = float(base_val or 0.0)
                     what = self.calc.what_if(base, pct)
                     ev = {"what_if": what}
                     step_results.append(StepResult(step.id, step.action, True, (time.time()-t0)*1000, ev))
@@ -654,9 +670,14 @@ class Executor:
                         lines.append(f"- **Anomalies detected:** {len(anomalies)}")
                 elif s.action == "breakdown":
                     bd = s.evidence.get("breakdown", {})
+                    by_field = bd.get("by") or "by"
                     top_items = bd.get("rows", [])[:3]
                     if top_items:
-                        lines.append(f"- **Top contributors:** {', '.join([str(r.get('by') or r.get('category', 'N/A')) for r in top_items])}")
+                        label_list = []
+                        for r in top_items:
+                            label = r.get(by_field) or r.get("by") or r.get("category") or r.get("by_col") or "N/A"
+                            label_list.append(str(label))
+                        lines.append(f"- **Top contributors:** {', '.join(label_list)}")
                 elif s.action == "compare_promo":
                     corr = s.evidence.get("corr_sales_promo", 0.0)
                     lines.append(f"- **Sales-Promo correlation:** {corr:.2f}")
